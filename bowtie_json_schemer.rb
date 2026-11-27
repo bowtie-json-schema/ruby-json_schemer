@@ -68,6 +68,67 @@ end
 
 @compiler = nil
 
+def unescape_json_pointer_token(token)
+  token.gsub(/~[01]/, '~1' => '/', '~0' => '~')
+end
+
+def collect_annotations(output_unit)
+  return [] unless output_unit.fetch('valid')
+
+  output_unit.fetch('annotations', []).filter_map do |unit|
+    next unless unit.key?('annotation')
+
+    keyword_token = unit.fetch('keywordLocation').split('/').last
+    {
+      keyword: unescape_json_pointer_token(keyword_token),
+      instanceLocation: unit.fetch('instanceLocation'),
+      absoluteKeywordLocation: unit.fetch('absoluteKeywordLocation'),
+      annotation: unit.fetch('annotation'),
+    }
+  end
+end
+
+def evaluate_test(schemer, test, output)
+  instance = test.fetch('instance')
+  return { valid: schemer.valid?(instance) } unless output == 'annotations'
+
+  result = schemer.validate(
+    instance,
+    output_format: 'basic',
+    resolve_enumerators: true,
+  )
+  {
+    valid: result.fetch('valid'),
+    annotations: collect_annotations(result),
+  }
+end
+
+def handle_run(request)
+  kase, seq = request.fetch_values('case', 'seq')
+  output = request.fetch('output', 'flag')
+
+  if output != 'flag' && (output != 'annotations' || JSON_SCHEMER_VERSION < '2.0.0')
+    return {
+      seq: seq,
+      results: kase.fetch('tests').map do
+        { skipped: true, message: "Unsupported output format: #{output}" }
+      end,
+    }
+  end
+
+  schemer = @compiler.call kase
+  {
+    seq: seq,
+    results: kase.fetch('tests').map { |test| evaluate_test(schemer, test, output) },
+  }
+rescue StandardError => e
+  {
+    seq: seq,
+    errored: true,
+    context: { message: e.message, traceback: e.full_message },
+  }
+end
+
 ARGF.each_line do |line| # rubocop:disable Metrics/BlockLength
   request = JSON.parse(line)
   cmd = request.fetch('cmd')
@@ -103,27 +164,7 @@ ARGF.each_line do |line| # rubocop:disable Metrics/BlockLength
 
     { ok: true }
   when 'run'
-    kase, seq = request.fetch_values('case', 'seq')
-
-    begin
-      schemer = @compiler.call kase
-
-      {
-        seq: seq,
-        results: kase.fetch('tests').map do |test|
-          { valid: schemer.valid?(test.fetch('instance')) }
-        end,
-      }
-    rescue StandardError => e
-      {
-        seq: seq,
-        errored: true,
-        context: {
-          message: e.message,
-          traceback: e.full_message,
-        },
-      }
-    end
+    handle_run(request)
   when 'stop'
     exit(0)
   else
